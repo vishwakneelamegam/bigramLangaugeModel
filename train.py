@@ -107,13 +107,23 @@ class head(nn.Module):
         output = weight @ v
         return output 
 
+# multi head attention
+class multiHeadAttention(nn.Module):
+    def __init__(self, numberOfHeads, headSize):
+        super().__init__()
+        self.heads = nn.ModuleList([head(headSize) for _ in range(numberOfHeads)])
+    
+    def forward(self, input):
+        return torch.cat([h(input) for h in self.heads], dim=-1)
+
 # bigram language model
 class bigramLLM(nn.Module):
     def __init__(self):
         super().__init__()
         self.tokenEmbeddingTable = nn.Embedding(characterSize, embeddingSize)
         self.positionEmbeddingTable = nn.Embedding(blockSize, embeddingSize)
-        self.selfAttentionHead = head(embeddingSize)
+        # 4 heads of 8 dimension self attention
+        self.selfAttentionHead = multiHeadAttention(4,embeddingSize//4)
         self.languageModelHead = nn.Linear(embeddingSize, characterSize)
     
     def forward(self, input, target = None):
