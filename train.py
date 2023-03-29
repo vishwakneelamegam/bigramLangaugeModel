@@ -44,7 +44,7 @@ def decodeCharacter(data):
     result = []
     for num in data:
         result.append(charMap[1][num])
-    return " ".join(result)
+    return "".join(result)
 
 # encode all the text and make as torch tensors
 data = torch.tensor(encodeCharacter(text), dtype=torch.long)
@@ -64,6 +64,9 @@ blockSize = 8
 # batch size (the transformers can parallely process the text, so batch size is mentioned)
 batchSize = 32
 
+# embedding size
+embeddingSize = 32
+
 # torch manual seed
 #torch.manual_seed(40)
 
@@ -81,15 +84,49 @@ def getBatch(toTrain = True):
     y = y.to(device)
     return x, y
 
+# self attention
+class head(nn.Module):
+    def __init__(self, headSize):
+        super().__init__()
+        self.key = nn.Linear(embeddingSize,headSize,bias = False)
+        self.query = nn.Linear(embeddingSize,headSize,bias = False)
+        self.value = nn.Linear(embeddingSize,headSize,bias = False)
+        self.register_buffer("tril", torch.tril(torch.ones(blockSize, blockSize)))
+    
+    def forward(self, input):
+        B, T, C = input.shape
+        k = self.key(input)
+        q = self.query(input)
+        # compute attention scores
+        # (B, T, C) @ (B, C, T) -> (B, T, T)
+        weight = q @ k.transpose(-2,-1) * C**-0.5
+        weight = weight.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        weight = F.softmax(weight, dim = 1)
+        v = self.value(input)
+        # (B, T, T) @ (B, T, C) -> (B, T, C)
+        output = weight @ v
+        return output 
+
 # bigram language model
 class bigramLLM(nn.Module):
-    def __init__(self, charSize):
+    def __init__(self):
         super().__init__()
-        self.tokenEmbeddingTable = nn.Embedding(charSize, charSize)
+        self.tokenEmbeddingTable = nn.Embedding(characterSize, embeddingSize)
+        self.positionEmbeddingTable = nn.Embedding(blockSize, embeddingSize)
+        self.selfAttentionHead = head(embeddingSize)
+        self.languageModelHead = nn.Linear(embeddingSize, characterSize)
     
     def forward(self, input, target = None):
+        B, T = input.shape
         # provides (batch, times, channel)
-        logits = self.tokenEmbeddingTable(input)
+        tokenEmbed = self.tokenEmbeddingTable(input)
+        # provides (times, channel)
+        positionEmbed = self.positionEmbeddingTable(torch.arange(T, device=device))
+        # provides (batch, times, channel)
+        totalEmbed = tokenEmbed + positionEmbed
+        totalEmbed = self.selfAttentionHead(totalEmbed)
+        # provides (batch, times, character size)
+        logits = self.languageModelHead(totalEmbed)
         if target is  None:
             loss = None
         else:
@@ -103,8 +140,10 @@ class bigramLLM(nn.Module):
     
     def generate(self, input, maxTokens):
         for _ in range(maxTokens):
+            # crop the input
+            inputCropped = input[:,-blockSize:]
             # get loss and logits
-            logits, loss = self(input)
+            logits, loss = self(inputCropped)
             # focusing only on the last time step so removing T from B T C. we get B C
             logits = logits[:, -1, :] 
             # apply the logits to the softmax to get the probability. we get B C
@@ -116,20 +155,21 @@ class bigramLLM(nn.Module):
         return input
 
 # BLL model
-bllModel = bigramLLM(characterSize)
+bllModel = bigramLLM()
 model = bllModel.to(device)
 
 # creating pytorch optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
 # train area
-for steps in range(50000):
+for steps in range(10000):
     xData, yData = getBatch()
     logits, loss = model(xData, yData)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
-    print(f"Loss : {loss.item()} Iteration : {steps + 1}")
+    if steps % 100 == 0:
+        print(f"Loss : {loss.item()} Iteration : {steps + 1}")
 
 # test area
 print(decodeCharacter(model.generate(input=torch.zeros((1,1),dtype=torch.long, device=device),maxTokens=500)[0].tolist()))
