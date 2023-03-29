@@ -58,14 +58,26 @@ trainData = data[:splitSize]
 # validate data
 validateData = data[splitSize:]
 
+# learning rate
+learningRate = 3e-4
+
 # block size (maximum text length)
-blockSize = 8 
+blockSize = 256
 
 # batch size (the transformers can parallely process the text, so batch size is mentioned)
-batchSize = 32
+batchSize = 64
 
 # embedding size
-embeddingSize = 32
+embeddingSize = 384
+
+# number of layers
+numberOfLayers = 6
+
+# number of heads
+numberOfHeads = 6
+
+# drop out
+dropOut = 0.2
 
 # torch manual seed
 #torch.manual_seed(40)
@@ -91,10 +103,12 @@ class block(nn.Module):
         headSize = embeddingSize // numberOfHeads
         self.selfAttention = multiHeadAttention(numberOfHeads, headSize)
         self.feedForwardLayer = feedForward(embeddingSize)
+        self.layerNormOne = nn.LayerNorm(embeddingSize)
+        self.layerNormTwo = nn.LayerNorm(embeddingSize)
     
     def forward(self, input):
-        input = input + self.selfAttention(input)
-        input = input + self.feedForwardLayer(input)
+        input = input + self.selfAttention(self.layerNormOne(input))
+        input = input + self.feedForwardLayer(self.layerNormTwo(input))
         return input
 
 # self attention
@@ -105,6 +119,7 @@ class head(nn.Module):
         self.query = nn.Linear(embeddingSize,headSize,bias = False)
         self.value = nn.Linear(embeddingSize,headSize,bias = False)
         self.register_buffer("tril", torch.tril(torch.ones(blockSize, blockSize)))
+        self.dropout = nn.Dropout(dropOut)
     
     def forward(self, input):
         B, T, C = input.shape
@@ -115,6 +130,7 @@ class head(nn.Module):
         weight = q @ k.transpose(-2,-1) * C**-0.5
         weight = weight.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         weight = F.softmax(weight, dim = 1)
+        weight = self.dropout(weight)
         v = self.value(input)
         # (B, T, T) @ (B, T, C) -> (B, T, C)
         output = weight @ v
@@ -126,10 +142,11 @@ class multiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([head(headSize) for _ in range(numberOfHeads)])
         self.projections = nn.Linear(embeddingSize, embeddingSize)
+        self.dropout = nn.Dropout(dropOut)
     
     def forward(self, input):
         output = torch.cat([h(input) for h in self.heads], dim=-1)
-        output = self.projections(output)
+        output = self.dropout(self.projections(output))
         return output
     
 # feed forward
@@ -140,6 +157,7 @@ class feedForward(nn.Module):
             nn.Linear(embeddingSize, 4 * embeddingSize),
               nn.ReLU(),
               nn.Linear(4 * embeddingSize, embeddingSize),
+              nn.Dropout(dropOut),
               )
 
     def forward(self, input):
@@ -151,11 +169,8 @@ class bigramLLM(nn.Module):
         super().__init__()
         self.tokenEmbeddingTable = nn.Embedding(characterSize, embeddingSize)
         self.positionEmbeddingTable = nn.Embedding(blockSize, embeddingSize)
-        self.blocks = nn.Sequential(
-            block(embeddingSize,numberOfHeads=4),
-            block(embeddingSize,numberOfHeads=4),
-            block(embeddingSize,numberOfHeads=4)
-        )
+        self.blocks = nn.Sequential(*[block(embeddingSize,numberOfHeads=numberOfHeads) for _ in range(numberOfLayers)])
+        self.layerNormalFunction = nn.LayerNorm(embeddingSize)
         # 4 heads of 8 dimension self attention
         self.languageModelHead = nn.Linear(embeddingSize, characterSize)
     
@@ -167,6 +182,7 @@ class bigramLLM(nn.Module):
         positionEmbed = self.positionEmbeddingTable(torch.arange(T, device=device))
         # provides (batch, times, channel)
         totalEmbed = tokenEmbed + positionEmbed
+        totalEmbed = self.blocks(totalEmbed)
         totalEmbed = self.blocks(totalEmbed)
         # provides (batch, times, character size)
         logits = self.languageModelHead(totalEmbed)
@@ -202,7 +218,7 @@ bllModel = bigramLLM()
 model = bllModel.to(device)
 
 # creating pytorch optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learningRate)
 
 # train area
 for steps in range(10000):
