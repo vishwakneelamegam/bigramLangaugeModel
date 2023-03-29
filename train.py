@@ -115,6 +115,15 @@ class multiHeadAttention(nn.Module):
     
     def forward(self, input):
         return torch.cat([h(input) for h in self.heads], dim=-1)
+    
+# feed forward
+class feedForward(nn.Module):
+    def __init__(self, embeddingSize):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(embeddingSize, embeddingSize), nn.ReLU(),)
+
+    def forward(self, input):
+        return self.net(input)
 
 # bigram language model
 class bigramLLM(nn.Module):
@@ -125,6 +134,7 @@ class bigramLLM(nn.Module):
         # 4 heads of 8 dimension self attention
         self.selfAttentionHead = multiHeadAttention(4,embeddingSize//4)
         self.languageModelHead = nn.Linear(embeddingSize, characterSize)
+        self.feedForwardLayer = feedForward(embeddingSize)
     
     def forward(self, input, target = None):
         B, T = input.shape
@@ -135,6 +145,7 @@ class bigramLLM(nn.Module):
         # provides (batch, times, channel)
         totalEmbed = tokenEmbed + positionEmbed
         totalEmbed = self.selfAttentionHead(totalEmbed)
+        totalEmbed = self.feedForwardLayer(totalEmbed)
         # provides (batch, times, character size)
         logits = self.languageModelHead(totalEmbed)
         if target is  None:
